@@ -672,7 +672,7 @@ namespace Microsoft.VisualStudio.Composition
                     throw new NotSupportedException();
                 }
 
-                if (count <= 0)
+                if (count == 0)
                 {
                     return ImmutableArray<T>.Empty;
                 }
