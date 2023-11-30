@@ -76,21 +76,9 @@ namespace Microsoft.VisualStudio.Composition
             return this.AddParts(new[] { partDefinition });
         }
 
-        private int thisAddPartsCall = 0;
-        private static int maxAddPartsCall = 0;
-        private static int addPartsCalls = 0;
-
         public ComposableCatalog AddParts(IEnumerable<ComposablePartDefinition> parts)
         {
             Requires.NotNull(parts, nameof(parts));
-
-            Interlocked.Increment(ref this.thisAddPartsCall);
-            Interlocked.Increment(ref addPartsCalls);
-
-            if (this.thisAddPartsCall > maxAddPartsCall)
-            {
-                maxAddPartsCall = this.thisAddPartsCall;
-            }
 
             var newParts = new HashSet<ComposablePartDefinition>(this.parts);
             var newTypesBackingParts = new HashSet<TypeRef>(this.typesBackingParts);
