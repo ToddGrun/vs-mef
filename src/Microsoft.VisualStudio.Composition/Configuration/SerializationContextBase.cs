@@ -18,10 +18,7 @@ namespace Microsoft.VisualStudio.Composition
     using System.Diagnostics.CodeAnalysis;
     using System.Globalization;
     using System.IO;
-    using System.Linq;
     using System.Reflection;
-    using System.Text;
-    using System.Threading.Tasks;
     using Microsoft.VisualStudio.Composition.Reflection;
 
     internal abstract class SerializationContextBase : IDisposable
@@ -223,8 +220,8 @@ namespace Microsoft.VisualStudio.Composition
                     var metadataToken = this.ReadCompressedMetadataToken(MetadataTokenType.Method);
                     var name = this.ReadString();
                     var isStatic = this.ReadCompressedUInt() != 0;
-                    var parameterTypes = this.ReadList(this.reader, this.readTypeRefDelegate).ToImmutableArray();
-                    var genericMethodArguments = this.ReadList(this.reader, this.readTypeRefDelegate).ToImmutableArray();
+                    var parameterTypes = this.ReadImmutableArray(this.reader, this.readTypeRefDelegate);
+                    var genericMethodArguments = this.ReadImmutableArray(this.reader, this.readTypeRefDelegate);
                     return new MethodRef(declaringType, metadataToken, name, isStatic, parameterTypes!, genericMethodArguments!);
                 }
                 else
@@ -476,12 +473,12 @@ namespace Microsoft.VisualStudio.Composition
                     var fullName = this.ReadString();
                     var flags = (TypeRefFlags)this.ReadCompressedUInt();
                     int genericTypeParameterCount = (int)this.ReadCompressedUInt();
-                    var genericTypeArguments = this.ReadList(this.reader, this.readTypeRefDelegate).ToImmutableArray();
+                    var genericTypeArguments = this.ReadImmutableArray(this.reader, this.readTypeRefDelegate);
 
                     var shallow = this.ReadCompressedUInt() != 0;
                     var baseTypes = shallow
                         ? ImmutableArray<TypeRef?>.Empty
-                        : this.ReadList(this.reader, this.readTypeRefDelegate).ToImmutableArray();
+                        : this.ReadImmutableArray(this.reader, this.readTypeRefDelegate);
 
                     var hasElementType = this.ReadCompressedUInt() != 0;
                     var elementType = hasElementType
@@ -660,6 +657,11 @@ namespace Microsoft.VisualStudio.Composition
 
         protected IReadOnlyList<T> ReadList<T>(BinaryReader reader, Func<T> itemReader)
         {
+            return this.ReadImmutableArray(reader, itemReader);
+        }
+
+        protected ImmutableArray<T> ReadImmutableArray<T>(BinaryReader reader, Func<T> itemReader)
+        {
             using (this.Trace(typeof(T).Name, isArray: true))
             {
                 uint count = this.ReadCompressedUInt();
@@ -670,18 +672,18 @@ namespace Microsoft.VisualStudio.Composition
                     throw new NotSupportedException();
                 }
 
-                if (count == 0)
+                if (count <= 0)
                 {
-                    return Array.Empty<T>();
+                    return ImmutableArray<T>.Empty;
                 }
 
-                var list = new T[count];
-                for (int i = 0; i < list.Length; i++)
+                ImmutableArray<T>.Builder list = ImmutableArray.CreateBuilder<T>((int)count);
+                for (int i = 0; i < list.Count; i++)
                 {
-                    list[i] = itemReader();
+                    list.Add(itemReader());
                 }
 
-                return list;
+                return list.ToImmutable();
             }
         }
 
