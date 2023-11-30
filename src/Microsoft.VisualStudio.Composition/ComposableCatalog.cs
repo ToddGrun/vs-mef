@@ -6,33 +6,30 @@ namespace Microsoft.VisualStudio.Composition
     using System;
     using System.Collections.Generic;
     using System.Collections.Immutable;
-    using System.ComponentModel;
     using System.Diagnostics.CodeAnalysis;
     using System.IO;
     using System.Linq;
     using System.Reflection;
-    using System.Text;
-    using System.Threading.Tasks;
     using Microsoft.VisualStudio.Composition.Reflection;
 
     public class ComposableCatalog : IEquatable<ComposableCatalog>
     {
         /// <summary>
-        /// The parts in the catalog.
+        /// The parts in the catalog. Do not mutate.
         /// </summary>
-        private ImmutableHashSet<ComposablePartDefinition> parts;
+        private HashSet<ComposablePartDefinition> parts;
 
         /// <summary>
-        /// The exports from parts in this catalog, indexed by contract name.
+        /// The exports from parts in this catalog, indexed by contract name. Do not mutate.
         /// </summary>
-        private ImmutableDictionary<string, ImmutableList<ExportDefinitionBinding>> exportsByContract;
+        private Dictionary<string, List<ExportDefinitionBinding>> exportsByContract;
 
         /// <summary>
-        /// The types that are represented in this catalog.
+        /// The types that are represented in this catalog. Do not mutate.
         /// </summary>
-        private ImmutableHashSet<TypeRef> typesBackingParts;
+        private HashSet<TypeRef> typesBackingParts;
 
-        private ComposableCatalog(ImmutableHashSet<ComposablePartDefinition> parts, ImmutableDictionary<string, ImmutableList<ExportDefinitionBinding>> exportsByContract, ImmutableHashSet<TypeRef> typesBackingParts, DiscoveredParts discoveredParts, Resolver resolver)
+        private ComposableCatalog(HashSet<ComposablePartDefinition> parts, Dictionary<string, List<ExportDefinitionBinding>> exportsByContract, HashSet<TypeRef> typesBackingParts, DiscoveredParts discoveredParts, Resolver resolver)
         {
             Requires.NotNull(parts, nameof(parts));
             Requires.NotNull(exportsByContract, nameof(exportsByContract));
@@ -52,7 +49,7 @@ namespace Microsoft.VisualStudio.Composition
         /// </summary>
         public IImmutableSet<ComposablePartDefinition> Parts
         {
-            get { return this.parts; }
+            get { return new NonSharingImmutableHashSet<ComposablePartDefinition>(this.parts); }
         }
 
         /// <summary>
@@ -65,9 +62,9 @@ namespace Microsoft.VisualStudio.Composition
         public static ComposableCatalog Create(Resolver resolver)
         {
             return new ComposableCatalog(
-                ImmutableHashSet.Create<ComposablePartDefinition>(),
-                ImmutableDictionary.Create<string, ImmutableList<ExportDefinitionBinding>>(),
-                ImmutableHashSet.Create<TypeRef>(),
+                new HashSet<ComposablePartDefinition>(),
+                new Dictionary<string, List<ExportDefinitionBinding>>(),
+                new HashSet<TypeRef>(),
                 DiscoveredParts.Empty,
                 resolver);
         }
@@ -76,48 +73,103 @@ namespace Microsoft.VisualStudio.Composition
         {
             Requires.NotNull(partDefinition, nameof(partDefinition));
 
-            var parts = this.parts.Add(partDefinition);
-            if (parts == this.parts)
-            {
-                // This part is already in the catalog.
-                return this;
-            }
-
-            var typesBackingParts = this.typesBackingParts.Add(partDefinition.TypeRef);
-            if (typesBackingParts == this.typesBackingParts)
-            {
-                Requires.Argument(false, nameof(partDefinition), Strings.TypeAlreadyInCatalogAsAnotherPart, partDefinition.TypeRef.FullName);
-            }
-
-            var exportsByContract = this.exportsByContract;
-
-            foreach (var exportDefinition in partDefinition.ExportedTypes)
-            {
-                var list = exportsByContract.GetValueOrDefault(exportDefinition.ContractName, ImmutableList.Create<ExportDefinitionBinding>());
-                exportsByContract = exportsByContract.SetItem(exportDefinition.ContractName, list.Add(new ExportDefinitionBinding(exportDefinition, partDefinition, default(MemberRef))));
-            }
-
-            foreach (var exportPair in partDefinition.ExportingMembers)
-            {
-                var member = exportPair.Key;
-                foreach (var export in exportPair.Value)
-                {
-                    var list = exportsByContract.GetValueOrDefault(export.ContractName, ImmutableList.Create<ExportDefinitionBinding>());
-                    exportsByContract = exportsByContract.SetItem(export.ContractName, list.Add(new ExportDefinitionBinding(export, partDefinition, member)));
-                }
-            }
-
-            return new ComposableCatalog(parts, exportsByContract, typesBackingParts, this.DiscoveredParts, this.Resolver);
+            return this.AddParts(new[] { partDefinition });
         }
+
+        private int thisAddPartsCall = 0;
+        private static int maxAddPartsCall = 0;
+        private static int addPartsCalls = 0;
 
         public ComposableCatalog AddParts(IEnumerable<ComposablePartDefinition> parts)
         {
             Requires.NotNull(parts, nameof(parts));
 
-            // PERF: This has shown up on ETL traces as inefficient and expensive
-            //       WithPart should call WithParts instead, and WithParts should
-            //       execute a more efficient batch operation.
-            return parts.Aggregate(this, (catalog, part) => catalog.AddPart(part));
+            Interlocked.Increment(ref this.thisAddPartsCall);
+            Interlocked.Increment(ref addPartsCalls);
+
+            if (this.thisAddPartsCall > maxAddPartsCall)
+            {
+                maxAddPartsCall = this.thisAddPartsCall;
+            }
+
+            var newParts = new HashSet<ComposablePartDefinition>(this.parts);
+            var newTypesBackingParts = new HashSet<TypeRef>(this.typesBackingParts);
+            var newExportsByContract = new Dictionary<string, List<ExportDefinitionBinding>>();
+            var updatedContracts = new HashSet<string>();
+
+            foreach (var kvp in this.exportsByContract)
+            {
+                newExportsByContract.Add(kvp.Key, kvp.Value);
+            }
+
+            foreach (var partDefinition in parts)
+            {
+                if (newParts.Contains(partDefinition))
+                {
+                    // This part is already in the catalog.
+                    continue;
+                }
+
+                if (newTypesBackingParts.Contains(partDefinition.TypeRef))
+                {
+                    Requires.Argument(false, nameof(partDefinition), Strings.TypeAlreadyInCatalogAsAnotherPart, partDefinition.TypeRef.FullName);
+                }
+
+                AddExportDefinitionBindings(partDefinition.ExportedTypes, partDefinition, default(MemberRef), newExportsByContract, updatedContracts);
+
+                foreach (var exportPair in partDefinition.ExportingMembers)
+                {
+                    AddExportDefinitionBindings(exportPair.Value, partDefinition, exportPair.Key, newExportsByContract, updatedContracts);
+                }
+
+                newParts.Add(partDefinition);
+                newTypesBackingParts.Add(partDefinition.TypeRef);
+            }
+
+            return new ComposableCatalog(
+                newParts,
+                newExportsByContract,
+                newTypesBackingParts,
+                this.DiscoveredParts,
+                this.Resolver);
+
+            static void AddExportDefinitionBindings(
+                IReadOnlyCollection<ExportDefinition> exportedTypes,
+                ComposablePartDefinition partDefinition,
+                MemberRef? member,
+                Dictionary<string, List<ExportDefinitionBinding>> newExportsByContract,
+                HashSet<string> updatedContracts)
+            {
+                foreach (var exportDefinition in exportedTypes)
+                {
+                    var contractName = exportDefinition.ContractName;
+                    var newExportBinding = new ExportDefinitionBinding(exportDefinition, partDefinition, member);
+
+                    if (!updatedContracts.Contains(contractName))
+                    {
+                        // This contract hasn't yet been changed. Create a new list for storing it's export bindings.
+                        updatedContracts.Add(contractName);
+
+                        if (!newExportsByContract.TryGetValue(contractName, out var exportBindings))
+                        {
+                            exportBindings = new List<ExportDefinitionBinding>();
+                        }
+                        else
+                        {
+                            // Duplicate existing export bindings
+                            exportBindings = new List<ExportDefinitionBinding>(exportBindings);
+                        }
+
+                        newExportsByContract[contractName] = exportBindings;
+                        exportBindings.Add(newExportBinding);
+                    }
+                    else
+                    {
+                        // This contract's bindings have already changed. Update in place.
+                        newExportsByContract[contractName].Add(newExportBinding);
+                    }
+                }
+            }
         }
 
         public ComposableCatalog AddParts(DiscoveredParts parts)
@@ -224,17 +276,23 @@ namespace Microsoft.VisualStudio.Composition
             Requires.NotNull(importDefinition, nameof(importDefinition));
 
             // We always want to consider exports with a matching contract name.
-            var exports = this.exportsByContract.GetValueOrDefault(importDefinition.ContractName, ImmutableList.Create<ExportDefinitionBinding>())!;
+            if (!this.exportsByContract.TryGetValue(importDefinition.ContractName, out var exports))
+            {
+                exports = new List<ExportDefinitionBinding>();
+            }
 
             // For those imports of generic types, we also want to consider exports that are based on open generic exports,
             string? genericTypeDefinitionContractName;
             Type[]? genericTypeArguments;
             if (TryGetOpenGenericExport(importDefinition, out genericTypeDefinitionContractName, out genericTypeArguments))
             {
-                var openGenericExports = this.exportsByContract.GetValueOrDefault(genericTypeDefinitionContractName, ImmutableList.Create<ExportDefinitionBinding>());
+                if (!this.exportsByContract.TryGetValue(genericTypeDefinitionContractName, out var openGenericExports))
+                {
+                    openGenericExports = new List<ExportDefinitionBinding>();
+                }
 
                 // We have to synthesize exports to match the required generic type arguments.
-                exports = exports.AddRange(
+                exports.AddRange(
                     from export in openGenericExports
                     select export.CloseGenericExport(genericTypeArguments));
             }
